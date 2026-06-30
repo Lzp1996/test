@@ -1,0 +1,343 @@
+name: PR Code Review with Claude
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [master]
+
+# 权限：部署 Pages 需要
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    outputs:
+      review-passed: ${{ steps.review-result.outputs.passed }}
+      risk-level: ${{ steps.review-result.outputs.risk }}
+      can-auto-fix: ${{ steps.review-result.outputs.can-fix }}
+      needs-human: ${{ steps.review-result.outputs.needs-human }}
+
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Configure Claude environment
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com' }}
+        run: |
+          echo "Claude Code version:"
+          claude --version
+          echo "Setting up Claude environment..."
+
+          # 检查认证方式
+          if [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
+            echo "✅ Using ANTHROPIC_AUTH_TOKEN"
+          elif [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "✅ Using ANTHROPIC_API_KEY"
+          else
+            echo "❌ No authentication configured"
+            exit 1
+          fi
+
+      - name: Run Claude Code Review
+        id: claude-review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com' }}
+        run: |
+          # 生成 diff 信息
+          git diff origin/${{ github.base_ref }}...${{ github.event.pull_request.head.sha }} > /tmp/pr-diff.txt
+
+          # 运行 Claude Code headless 审查
+          bash .github/scripts/claude-review.sh \
+            "${{ github.event.pull_request.number }}" \
+            "${{ github.event.pull_request.title }}" \
+            "${{ github.event.pull_request.user.login }}" \
+            "/tmp/pr-diff.txt"
+
+      - name: Parse Review Result
+        id: review-result
+        run: |
+          # 解析 Claude 返回的 JSON 结果
+          RESULT=$(cat /tmp/claude-review-result.json)
+
+          echo "passed=$(echo $RESULT | jq -r '.passed')" >> $GITHUB_OUTPUT
+          echo "risk=$(echo $RESULT | jq -r '.risk_level')" >> $GITHUB_OUTPUT
+          echo "can-fix=$(echo $RESULT | jq -r '.can_auto_fix')" >> $GITHUB_OUTPUT
+          echo "needs-human=$(echo $RESULT | jq -r '.needs_human_review')" >> $GITHUB_OUTPUT
+
+          # 保存完整结果供后续步骤使用
+          echo "$RESULT" > /tmp/review-summary.json
+
+      - name: Comment Review Result on PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const result = JSON.parse(fs.readFileSync('/tmp/review-summary.json', 'utf8'));
+
+            const riskEmoji = {
+              'low': '🟢',
+              'medium': '🟡',
+              'high': '🔴'
+            };
+
+            const body = `## 🤖 Claude Code 自动审查结果
+
+            **审查状态**: ${result.passed ? '✅ 通过' : '❌ 未通过'}
+            **风险级别**: ${riskEmoji[result.risk_level]} ${result.risk_level.toUpperCase()}
+            **可自动修复**: ${result.can_auto_fix ? '✅ 是' : '❌ 否'}
+            **需要人工审核**: ${result.needs_human_review ? '⚠️ 是' : '✅ 否'}
+
+            ### 📋 问题描述
+            ${result.issues.map(issue => `- ${issue}`).join('\n')}
+
+            ### 🔧 修复建议
+            ${result.suggestions.map(s => `- ${s}`).join('\n')}
+
+            ### 📊 变更统计
+            - 文件数: ${result.files_changed}
+            - 添加行数: +${result.lines_added}
+            - 删除行数: -${result.lines_deleted}
+
+            ---
+            **自动化决策**: ${result.auto_decision}
+            ${result.max_fix_attempts > 0 ? `**最大修复次数**: ${result.max_fix_attempts}` : ''}
+            `;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+      - name: Upload Review Result
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-review-result
+          path: /tmp/review-summary.json
+          retention-days: 30
+
+  auto-fix:
+    needs: claude-review
+    if: |
+      needs.claude-review.outputs.review-passed == 'false' &&
+      needs.claude-review.outputs.can-auto-fix == 'true' &&
+      needs.claude-review.outputs.needs-human == 'false'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Download Review Result
+        uses: actions/download-artifact@v4
+        with:
+          name: claude-review-result
+          path: /tmp
+
+      - name: Auto Fix Issues
+        id: auto-fix
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com' }}
+        run: |
+          bash .github/scripts/claude-fix.sh \
+            "/tmp/review-summary.json" \
+            "${{ github.event.pull_request.number }}"
+
+      - name: Commit and Push Fixes
+        if: steps.auto-fix.outputs.fixed == 'true'
+        run: |
+          git config --local user.email "claude-bot@github.actions"
+          git config --local user.name "Claude Bot"
+          git add .
+          git commit -m "🤖 Claude auto-fix: $(cat /tmp/fix-summary.txt)"
+          git push
+
+      - name: Comment Fix Result
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const fixed = '${{ steps.auto-fix.outputs.fixed }}' === 'true';
+
+            const body = fixed
+              ? `## 🔧 Claude 自动修复完成\n\n已自动修复代码问题并提交，请重新触发审查流程。\n\n修复内容:\n${fs.readFileSync('/tmp/fix-summary.txt', 'utf8')}`
+              : `## ⚠️ 自动修复失败\n\n无法自动修复问题，需要人工介入。`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+  decision:
+    needs: claude-review
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Make Deployment Decision
+        id: make-decision
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const passed = '${{ needs.claude-review.outputs.review-passed }}' === 'true';
+            const risk = '${{ needs.claude-review.outputs.risk-level }}';
+            const needsHuman = '${{ needs.claude-review.outputs.needs-human }}' === 'true';
+
+            let decision = '';
+            let label = '';
+            let autoMerge = false;
+
+            if (passed && risk === 'low' && !needsHuman) {
+              decision = '✅ **自动部署**: 低风险变更，审查通过，将自动合并并部署';
+              label = 'auto-deploy-approved';
+              autoMerge = true;
+            } else if (passed && risk === 'medium') {
+              decision = '⚠️ **需要确认**: 中等风险变更，请人工确认后合并';
+              label = 'needs-human-approval';
+            } else if (risk === 'high' || needsHuman) {
+              decision = '🔴 **必须人工审核**: 高风险变更或复杂修改，需要详细审查';
+              label = 'needs-human-review';
+            } else {
+              decision = '❌ **审查未通过**: 代码存在问题，请修复后重新提交';
+              label = 'review-failed';
+            }
+
+            // 添加标签
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: [label]
+            });
+
+            // 评论决策结果
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## 🎯 部署决策\n\n${decision}`
+            });
+
+            core.setOutput('auto-merge', autoMerge);
+            core.setOutput('label', label);
+
+      - name: Auto-merge PR (low risk only)
+        if: steps.make-decision.outputs.auto-merge == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            try {
+              // 检查 PR 状态
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number
+              });
+
+              // 检查是否可以合并
+              if (!pr.mergeable) {
+                console.log('❌ PR has conflicts, cannot auto-merge');
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: '⚠️ PR 有冲突，无法自动合并，请手动解决冲突后重新提交。'
+                });
+                return;
+              }
+
+              // 检查是否有必需的检查通过
+              const { data: reviews } = await github.rest.pulls.listReviews({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number
+              });
+
+              // 自动合并
+              console.log('✅ Auto-merging PR...');
+              await github.rest.pulls.merge({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+                merge_method: 'squash', // 或 'merge' 或 'rebase'
+                commit_title: `${pr.title} (#${context.issue.number})`,
+                commit_message: `Auto-merged by Claude Code automation\n\n${pr.body || ''}\n\nCo-Authored-By: Claude Bot <claude-bot@github.actions>`
+              });
+
+              console.log('✅ PR merged successfully');
+
+              // 评论成功信息
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `## ✅ 自动合并成功\n\n低风险变更已自动合并，部署流程将自动触发。\n\n📊 **审查摘要**:\n- 风险级别: 🟢 Low\n- 审查状态: ✅ Passed\n- 合并方式: Squash and merge\n\n部署完成后会自动通知。`
+              });
+
+            } catch (error) {
+              console.error('❌ Auto-merge failed:', error.message);
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `## ⚠️ 自动合并失败\n\n自动合并时发生错误，请手动合并 PR。\n\n错误信息: ${error.message}`
+              });
+
+              // 移除自动部署标签，改为需要人工确认
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: 'auto-deploy-approved'
+              }).catch(() => {});
+
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: ['needs-human-approval']
+              });
+            }
