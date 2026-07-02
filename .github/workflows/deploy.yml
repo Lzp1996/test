@@ -150,19 +150,24 @@ jobs:
 
           echo "✅ Build validation passed (size: ${BUILD_SIZE} bytes)"
 
-      # 8. 上传构建产物
+      # 8. 配置 GitHub Pages（官方必需步骤，缺少时容易卡在 deployment_queued）
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      # 9. 上传构建产物
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
         with:
           path: dist
 
-      # 9. 部署到 GitHub Pages
+      # 10. 部署到 GitHub Pages
       - name: Deploy to GitHub Pages
         id: deployment
-        continue-on-error: true  # 继续执行以便处理失败情况
         uses: actions/deploy-pages@v5
+        with:
+          timeout: 300000  # 5 分钟超时，避免无限卡在 deployment_queued
 
-      # 10. 检查部署状态
+      # 11. 检查部署状态
       - name: Check deployment status
         id: deploy-check
         run: |
@@ -174,7 +179,7 @@ jobs:
             echo "deploy-success=false" >> $GITHUB_OUTPUT
           fi
 
-      # 11. 运行健康检查（可选）
+      # 12. 运行健康检查（可选）
       - name: Health check
         id: health-check
         if: steps.deploy-check.outputs.deploy-success == 'true'
@@ -206,7 +211,7 @@ jobs:
             exit 1
           fi
 
-      # 12. 创建部署标签（仅当部署和健康检查都成功）
+      # 13. 创建部署标签（仅当部署和健康检查都成功）
       - name: Tag successful deployment
         if: |
           steps.deploy-check.outputs.deploy-success == 'true' &&
@@ -223,7 +228,7 @@ jobs:
 
           echo "✅ Created deployment tag: $TAG_NAME"
 
-      # 13. 保存部署备份
+      # 14. 保存部署备份
       - name: Save deployment backup
         if: |
           steps.deploy-check.outputs.deploy-success == 'true' &&
@@ -234,7 +239,7 @@ jobs:
           path: /tmp/build-backup.tar.gz
           retention-days: 7  # 减少存储时间
 
-      # 14. 处理部署失败 - 自动回滚
+      # 15. 处理部署失败 - 自动回滚
       - name: Rollback on deployment failure
         if: |
           failure() &&
@@ -249,7 +254,7 @@ jobs:
           echo "Please run the 'Rollback Deployment' workflow"
           echo "Target: ${{ steps.last-deploy.outputs.last-tag }}"
 
-      # 15. 部署结果通知
+      # 16. 部署结果通知
       - name: Deployment result notification
         if: always()
         uses: actions/github-script@v7
@@ -308,7 +313,7 @@ jobs:
 
             console.log(body);
 
-      # 16. 失败时退出
+      # 17. 失败时退出
       - name: Fail workflow on deployment failure
         if: steps.deploy-check.outputs.deploy-success != 'true'
         run: |
