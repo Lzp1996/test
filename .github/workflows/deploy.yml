@@ -69,6 +69,24 @@ jobs:
         with:
           path: ./dist
 
+      # Pages API 同时只允许一个 deployment；取消近期 commit 上卡住的 in-progress 部署
+      - name: Cancel blocking Pages deployments
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          CURRENT="${{ github.sha }}"
+          for sha in $(git log --format=%H -n 10); do
+            [ "$sha" = "$CURRENT" ] && continue
+            status=$(gh api "repos/${{ github.repository }}/pages/deployments/${sha}" --jq '.status // empty' 2>/dev/null || true)
+            case "$status" in
+              deployment_in_progress|syncing_files|finished_file_sync|updating_pages|purging_cdn)
+                echo "Cancelling blocking deployment ${sha:0:7} (status: $status)"
+                gh api --method POST "repos/${{ github.repository }}/pages/deployments/${sha}/cancel" || true
+                ;;
+            esac
+          done
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
