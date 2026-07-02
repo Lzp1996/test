@@ -71,16 +71,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: prNumber,
-                body: `## ⏭️ 跳过 Claude 审查
-
-**原因**: ${skipReason}
-
-**注意**: 此 PR 已跳过自动代码审查，请确保：
-- ✅ 代码已经过人工审查
-- ✅ 测试已通过
-- ✅ 变更风险可控
-
-此 PR 将直接进入自动合并流程。`
+                body: `## ⏭️ 跳过 Claude 审查\n\n**原因**: ${skipReason}\n\n**注意**: 此 PR 已跳过自动代码审查，请确保：\n- ✅ 代码已经过人工审查\n- ✅ 测试已通过\n- ✅ 变更风险可控\n\n此 PR 将直接进入自动合并流程。`
               });
             }
 
