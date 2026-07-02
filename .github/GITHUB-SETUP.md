@@ -115,6 +115,18 @@
 颜色: #6A737D (灰色)
 ```
 
+### 可选标签：跳过审查（见 SKIP-REVIEW.md）
+
+如需使用跳过审查功能，额外创建以下标签：
+
+```
+skip-claude-review    # 蓝色 #0075CA - 跳过 Claude 审查
+skip-review           # 蓝色 #0075CA - 跳过 Claude 审查
+auto-merge-approved   # 蓝色 #0075CA - 触发跳过（与 auto-deploy-approved 不同）
+```
+
+PR 标题也可使用 `[skip-review]`、`[deploy-direct]`、`[trusted]` 跳过审查。
+
 ### 快速创建命令（使用 GitHub CLI）
 
 ```bash
@@ -133,6 +145,11 @@ gh label create "needs-human-review" \
 gh label create "review-failed" \
   --description "Code review failed, needs fixes" \
   --color "6A737D"
+
+# 可选：跳过审查标签
+gh label create "skip-claude-review" --color "0075CA" --description "Skip Claude review" || true
+gh label create "skip-review" --color "0075CA" --description "Skip Claude review" || true
+gh label create "auto-merge-approved" --color "0075CA" --description "Trigger skip review" || true
 ```
 
 ---
@@ -271,6 +288,7 @@ git push -u origin test/auto-deploy
   - [ ] `needs-human-approval` (黄色)
   - [ ] `needs-human-review` (红色)
   - [ ] `review-failed` (灰色)
+  - [ ] 跳过审查标签（可选，见 SKIP-REVIEW.md）
   
 - [ ] **Pages 配置**（如果使用）
   - [ ] Source 设置为 GitHub Actions
@@ -379,6 +397,7 @@ Label does not exist
 
 - [SETUP.md](./SETUP.md) - 详细设置指南
 - [CONFIG.md](./CONFIG.md) - 完整配置说明
+- [SKIP-REVIEW.md](./SKIP-REVIEW.md) - 跳过审查指南
 - [AUTO-MERGE.md](./AUTO-MERGE.md) - 自动合并配置
 
 ---

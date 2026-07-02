@@ -169,13 +169,30 @@ git push -u origin test-claude-review
 2. ✅ PR 被添加标签（应该是 `auto-deploy-approved`）
 3. ✅ 出现"部署决策"评论
 
-### 5. 合并 PR
+### 5. 观察自动化流程
 
-点击 Merge pull request
+等待几分钟，观察：
 
-等待部署完成（Actions 标签页）
+1. ✅ PR 下方出现 Claude 审查评论
+2. ✅ PR 被添加标签（应该是 `auto-deploy-approved`）
+3. ✅ 出现"部署决策"评论
+4. ✅ 低风险 PR 会自动合并（无需手动点击 Merge）
 
-访问 GitHub Pages 验证部署成功。
+### 5b. 测试跳过审查（可选）
+
+文档类 PR 可在标题加 `[skip-review]` 跳过 Claude 审查：
+
+```bash
+git checkout -b test/skip-review
+echo "<!-- skip test -->" >> README.md
+git add README.md && git commit -m "docs: skip review test"
+git push -u origin test/skip-review
+# PR 标题: [skip-review] docs: skip review test
+```
+
+预期：跳过 Claude 审查，直接自动合并。详见 [SKIP-REVIEW.md](./SKIP-REVIEW.md)
+
+### 6. 验证部署
 
 ## 四、测试自动修复
 
@@ -284,7 +301,12 @@ curl -X POST "$ANTHROPIC_BASE_URL/v1/messages" \
 **原因**：Claude 返回的不是纯 JSON
 
 **解决**：
-1. 检查 `/tmp/claude-review-raw.txt` 查看原始输出
+1. 检查临时文件（本地测试时 RUN_ID 为 shell PID）：
+   ```bash
+   TMP_PREFIX="/tmp/pr-1-$$"
+   cat ${TMP_PREFIX}-claude-review-raw.txt
+   cat ${TMP_PREFIX}-claude-review.log
+   ```
 2. 调整 prompt 更明确要求 JSON 输出
 3. 改进 JSON 提取逻辑（使用更强大的解析器）
 
@@ -295,7 +317,21 @@ curl -X POST "$ANTHROPIC_BASE_URL/v1/messages" \
 **解决**：
 1. 检查 git config 是否正确
 2. 确认 GitHub Token 有 write 权限
-3. 查看 `/tmp/claude-fix.log` 日志
+3. 查看修复日志：
+   ```bash
+   TMP_PREFIX="/tmp/pr-${PR_NUMBER}-${RUN_ID}"
+   cat ${TMP_PREFIX}-claude-fix.log
+   ```
+
+### Q3b: 自动修复冲突
+
+**症状**：PR 中出现「自动修复冲突」评论
+
+**原因**：推送修复时远程分支已有新提交，rebase 失败
+
+**解决**：
+1. 手动拉取最新代码并解决冲突
+2. 重新触发审查（push 新 commit 或关闭并重新打开 PR）
 
 ### Q4: 部署没有触发
 
@@ -368,9 +404,9 @@ fi
 
 ### 2. 日志保留
 
-所有审查结果会作为 artifact 保存 30 天，可以下载分析：
+所有审查结果会作为 artifact 保存 7 天，可以下载分析：
 
-Actions → Workflow run → Artifacts → claude-review-result
+Actions → Workflow run → Artifacts → `claude-review-result-pr-{number}-{run_id}`
 
 ### 3. 持续改进
 
@@ -383,4 +419,4 @@ Actions → Workflow run → Artifacts → claude-review-result
 
 **完成！** 现在你的仓库已经配置好 GitHub + Claude 自动化审查和部署系统。
 
-有问题查看 [CONFIG.md](./CONFIG.md) 了解更多配置细节。
+相关文档：[CONFIG.md](./CONFIG.md) | [SKIP-REVIEW.md](./SKIP-REVIEW.md) | [AUTO-MERGE.md](./AUTO-MERGE.md)

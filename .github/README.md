@@ -24,12 +24,23 @@
 - ✅ **高风险** → 必须人工审核
 - ✅ 自动添加标签标识状态
 
+### 3b. 跳过审查（可选）
+- ✅ PR 标题或标签触发跳过 Claude 审查
+- ✅ 跳过后直接进入自动合并和部署
+- ✅ 自动记录跳过原因并评论到 PR
+- ⚠️ 仅限文档、样式等低风险变更，详见 [SKIP-REVIEW.md](./SKIP-REVIEW.md)
+
 ### 4. 完整的审计追踪
-- ✅ 所有审查结果保存为 artifacts（30天）
+- ✅ 所有审查结果保存为 artifacts（7天）
 - ✅ 详细的操作日志
 - ✅ 评论记录所有决策过程
 
-### 5. 部署回滚机制
+### 5. 并发安全
+- ✅ 同一 PR 分支的 workflow 排队执行，避免冲突
+- ✅ 临时文件使用 PR 编号 + Run ID 唯一命名
+- ✅ 自动修复推送前检测远程变更并尝试 rebase
+
+### 6. 部署回滚机制
 - ✅ 部署前自动备份
 - ✅ 构建和健康检查验证
 - ✅ 失败自动提示回滚
@@ -51,7 +62,12 @@
 │   └── quick-rollback.sh      # 本地快速回滚工具
 ├── SETUP.md                   # 快速启动指南
 ├── CONFIG.md                  # 详细配置文档
+├── AUTH.md                    # 认证配置指南
+├── AUTO-MERGE.md              # 自动合并配置说明
+├── SKIP-REVIEW.md             # 跳过审查指南
+├── GITHUB-SETUP.md            # GitHub 配置清单
 ├── ROLLBACK.md                # 回滚操作指南
+├── FLOWCHARTS.md              # 系统流程图
 └── README.md                  # 本文件
 ```
 
@@ -77,10 +93,16 @@ Settings → Actions → General → Workflow permissions：
 
 创建以下标签（Issues → Labels）：
 
-- `auto-deploy-approved` - 绿色
+- `auto-deploy-approved` - 绿色（审查通过或跳过后自动添加）
 - `needs-human-approval` - 黄色  
 - `needs-human-review` - 红色
 - `review-failed` - 灰色
+
+可选（用于跳过审查，见 [SKIP-REVIEW.md](./SKIP-REVIEW.md)）：
+
+- `skip-claude-review` - 蓝色
+- `skip-review` - 蓝色
+- `auto-merge-approved` - 蓝色（触发跳过，与 `auto-deploy-approved` 不同）
 
 ### 第四步：测试
 
@@ -92,13 +114,15 @@ Settings → Actions → General → Workflow permissions：
 
 ```mermaid
 graph TD
-    A[提交 PR] --> B[Claude Code 审查]
-    B --> C{审查结果}
-    C -->|通过 + 低风险| D[自动部署]
-    C -->|未通过 + 可修复| E[自动修复]
-    C -->|高风险| F[人工审核]
+    A[提交 PR] --> B{跳过标签?}
+    B -->|是| D[自动合并部署]
+    B -->|否| C[Claude Code 审查]
+    C --> R{审查结果}
+    R -->|通过 + 低风险| D
+    R -->|未通过 + 可修复| E[自动修复]
+    R -->|高风险| F[人工审核]
     E --> G{修复成功?}
-    G -->|是| B
+    G -->|是| C
     G -->|否| F
     F --> H{人工批准?}
     H -->|是| D
@@ -216,7 +240,7 @@ Claude 会从以下维度审查代码：
 
 ### 审计追踪
 
-- 所有审查结果保存 30 天
+- 所有审查结果保存 7 天
 - 完整的 git 提交历史
 - GitHub Actions 日志
 - PR 评论记录
@@ -255,6 +279,8 @@ Claude 会从以下维度审查代码：
 - [CONFIG.md](./CONFIG.md) - 详细配置文档
 - [AUTH.md](./AUTH.md) - 认证配置指南
 - [AUTO-MERGE.md](./AUTO-MERGE.md) - 自动合并配置说明
+- [SKIP-REVIEW.md](./SKIP-REVIEW.md) - 跳过审查指南
+- [GITHUB-SETUP.md](./GITHUB-SETUP.md) - GitHub 配置清单
 - [ROLLBACK.md](./ROLLBACK.md) - 回滚操作指南
 - [FLOWCHARTS.md](./FLOWCHARTS.md) - 系统流程图
 
@@ -294,9 +320,11 @@ curl -H "x-api-key: $ANTHROPIC_API_KEY" \
 
 ### JSON 解析错误
 
-查看原始输出：
+查看原始输出（`PR_NUMBER` 和 `RUN_ID` 替换为实际值）：
 ```bash
-cat /tmp/claude-review-raw.txt
+TMP_PREFIX="/tmp/pr-${PR_NUMBER}-${RUN_ID}"
+cat ${TMP_PREFIX}-claude-review-raw.txt
+cat ${TMP_PREFIX}-claude-review.log
 ```
 
 ### 部署未触发

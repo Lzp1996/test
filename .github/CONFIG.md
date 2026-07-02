@@ -5,10 +5,9 @@
 ```
 PR 提交
     ↓
-Claude Code Headless 审查
+check-skip-review（检查跳过标签）
     ↓
-返回 JSON 结果
-    ↓
+    ├─ 跳过 → 自动合并部署
     ├─ 低风险 + 通过 → 自动部署
     ├─ 可自动修复 → Claude 修复 → 重新审查
     └─ 高风险/修复失败 → 人工审核
@@ -53,21 +52,66 @@ ANTHROPIC_BASE_URL=https://your-proxy.com
 
 在仓库中创建以下标签（Issues → Labels）：
 
-- `auto-deploy-approved` - 绿色 - 低风险自动部署
+- `auto-deploy-approved` - 绿色 - 低风险自动部署（审查通过或跳过后添加）
 - `needs-human-approval` - 黄色 - 需要人工确认
 - `needs-human-review` - 红色 - 必须人工审核
 - `review-failed` - 灰色 - 审查未通过
 
+**可选（跳过审查，见 [SKIP-REVIEW.md](./SKIP-REVIEW.md)）：**
+
+- `skip-claude-review` - 蓝色 - 跳过 Claude 审查
+- `skip-review` - 蓝色 - 跳过 Claude 审查
+- `auto-merge-approved` - 蓝色 - 触发跳过（与 `auto-deploy-approved` 不同）
+
 ## 🔄 工作流程说明
 
-### PR 审查流程（pr-review.yml）
+### Job 结构（pr-review.yml）
 
-1. **触发条件**：PR 创建、更新或重新打开
+```
+check-skip-review  →  检查是否跳过审查
+       ↓
+  ┌────┴────┐
+  │ 跳过?   │
+  └────┬────┘
+   是  │  否
+       │   ↓
+       │  claude-review  →  Claude 审查 + 评论 + 上传 artifact
+       │       ↓
+       │  auto-fix（条件触发）→  自动修复 + 推送
+       ↓       ↓
+     decision  →  部署决策 + 自动合并（低风险或跳过）
+```
+
+### 跳过审查（check-skip-review job）
+
+PR 满足以下**任一**条件时跳过 Claude 审查，直接进入自动合并：
+
+**PR 标题标签**（需包含方括号）：
+- `[skip-review]`
+- `[deploy-direct]`
+- `[trusted]`
+
+**PR 标签**：
+- `skip-claude-review`
+- `skip-review`
+- `auto-merge-approved`（触发跳过，与决策输出的 `auto-deploy-approved` 不同）
+
+跳过时会：
+1. 在 PR 中评论跳过原因
+2. `decision` job 添加 `auto-deploy-approved` 标签
+3. 触发自动合并和部署
+
+详细用法见 [SKIP-REVIEW.md](./SKIP-REVIEW.md)
+
+### PR 审查流程（claude-review job）
+
+1. **触发条件**：`check-skip-review` 输出 `should-skip == false`
 2. **审查步骤**：
-   - 生成 PR diff
-   - Claude Code headless 分析代码
+   - 生成 PR diff（唯一临时文件路径）
+   - Claude Code headless 分析代码（`claude-sonnet-4-6`）
    - 返回结构化 JSON 结果
    - 在 PR 中评论审查报告
+   - 上传 artifact（保留 7 天，名称含 PR 编号和 Run ID）
 
 3. **JSON 输出格式**：
 ```json
@@ -93,27 +137,66 @@ ANTHROPIC_BASE_URL=https://your-proxy.com
 ### 自动修复流程（auto-fix job）
 
 **触发条件**：
-- 审查未通过 + 可自动修复 + 不需要人工审核
+- 未跳过审查 + 审查未通过 + 可自动修复 + 不需要人工审核
 
 **执行步骤**：
-1. 下载审查结果
+1. 下载审查结果 artifact
 2. Claude Code 自动修复代码
 3. 运行 lint 验证
-4. 提交修复（触发重新审查）
-5. 评论修复结果
+4. 检测远程分支是否有新提交，如有则 stash + rebase
+5. 提交并推送修复（触发重新审查）
+6. 评论修复结果（成功 / 失败 / 冲突）
 
 **重试机制**：
 - 最多重试 `max_fix_attempts` 次
 - 每次修复后运行 lint 检查
-- 失败则回滚并重试
+- lint 失败则 `git reset --hard HEAD` 回滚并重试
 - 全部失败则标记为需要人工介入
+
+**冲突处理**：
+- 推送前检测远程分支是否有新提交
+- 尝试 stash → rebase → stash pop
+- rebase 冲突或推送失败时，在 PR 中评论并标记需要人工介入
+
+### 并发控制
+
+`pr-review.yml` 配置了 concurrency，同一 PR 分支的 workflow 不会并行运行：
+
+```yaml
+concurrency:
+  group: pr-review-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: false  # 排队等待，不取消正在运行的
+```
+
+### 临时文件命名
+
+脚本和 workflow 使用 PR 编号 + Run ID 创建唯一临时文件，避免并发冲突：
+
+```bash
+TMP_PREFIX="/tmp/pr-${PR_NUMBER}-${GITHUB_RUN_ID:-$$}"
+```
+
+| 文件 | 路径 |
+|------|------|
+| 审查 prompt | `${TMP_PREFIX}-review-prompt.txt` |
+| 审查原始输出 | `${TMP_PREFIX}-claude-review-raw.txt` |
+| 审查日志 | `${TMP_PREFIX}-claude-review.log` |
+| 审查 JSON 结果 | `${TMP_PREFIX}-claude-review-result.json` → 复制到 `/tmp/claude-review-result.json` |
+| 修复 prompt | `${TMP_PREFIX}-fix-prompt.txt` |
+| 修复日志 | `${TMP_PREFIX}-claude-fix.log` |
+| 修复摘要 | `${TMP_PREFIX}-fix-summary.txt` → 复制到 `/tmp/fix-summary.txt` |
+
+本地测试时 `GITHUB_RUN_ID` 未设置，会使用 shell PID（`$$`）作为后缀。
 
 ### 决策流程（decision job）
 
-根据审查结果自动决策：
+`decision` job 在 `check-skip-review` 完成后始终运行（`if: always() && !cancelled()`）。
+
+根据审查结果或跳过状态自动决策：
 
 | 条件 | 决策 | 标签 |
 |------|------|------|
+| 跳过审查 | ✅ 跳过审查 - 自动部署 | `auto-deploy-approved` |
 | 通过 + 低风险 + 无需人工 | ✅ 自动部署 | `auto-deploy-approved` |
 | 通过 + 中等风险 | ⚠️ 需要确认 | `needs-human-approval` |
 | 高风险 或 需要人工 | 🔴 必须审核 | `needs-human-review` |
@@ -210,8 +293,9 @@ bash .github/scripts/claude-fix.sh \
 
 **问题：Claude API 调用失败**
 ```bash
-# 检查日志文件
-cat /tmp/claude-review.log
+# 检查日志文件（替换 PR_NUMBER 和 RUN_ID 为实际值）
+TMP_PREFIX="/tmp/pr-${PR_NUMBER}-${RUN_ID}"
+cat ${TMP_PREFIX}-claude-review.log
 
 # 验证 API Key
 curl -H "x-api-key: $ANTHROPIC_API_KEY" \
@@ -221,21 +305,28 @@ curl -H "x-api-key: $ANTHROPIC_API_KEY" \
 
 **问题：JSON 解析失败**
 ```bash
+TMP_PREFIX="/tmp/pr-${PR_NUMBER}-${RUN_ID}"
 # 查看原始输出
-cat /tmp/claude-review-raw.txt
+cat ${TMP_PREFIX}-claude-review-raw.txt
 
 # 手动提取 JSON
-grep -o '{.*}' /tmp/claude-review-raw.txt | jq '.'
+grep -o '{.*}' ${TMP_PREFIX}-claude-review-raw.txt | jq '.'
 ```
 
 **问题：自动修复失败**
 ```bash
+TMP_PREFIX="/tmp/pr-${PR_NUMBER}-${RUN_ID}"
 # 查看修复日志
-cat /tmp/claude-fix.log
+cat ${TMP_PREFIX}-claude-fix.log
 
 # 检查 lint 配置
 npm run lint -- --debug
 ```
+
+**问题：自动修复冲突**
+- 症状：PR 中出现「自动修复冲突」评论
+- 原因：推送修复时远程分支已有新提交，rebase 失败
+- 解决：手动解决冲突后重新触发审查，或关闭并重新打开 PR
 
 ## 🚀 使用示例
 
@@ -289,7 +380,7 @@ npm run lint -- --debug
 
 1. **失败回退**：任何自动化失败都应该回退到人工审核
 2. **通知机制**：关键决策都应该发送通知
-3. **审计追踪**：保留所有审查和修复记录（artifacts）
+3. **审计追踪**：保留所有审查和修复记录（artifacts，7 天）
 4. **测试覆盖**：确保有完整的测试套件作为安全网
 
 ## 🎓 最佳实践

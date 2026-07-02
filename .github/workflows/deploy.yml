@@ -230,9 +230,9 @@ jobs:
           steps.health-check.outputs.health-success == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: deployment-backup-${{ github.sha }}
+          name: deployment-backup-${{ github.sha }}-${{ github.run_id }}
           path: /tmp/build-backup.tar.gz
-          retention-days: 30
+          retention-days: 7  # 减少存储时间
 
       # 14. 处理部署失败 - 自动回滚
       - name: Rollback on deployment failure

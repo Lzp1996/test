@@ -7,12 +7,32 @@
 ### 1. pr-review.yml - PR 自动审查
 **触发条件：** PR 创建、更新或重新打开
 
+**Job 结构：**
+
+| Job | 条件 | 说明 |
+|-----|------|------|
+| `check-skip-review` | 始终运行 | 检查标题/标签是否跳过审查 |
+| `claude-review` | 未跳过 | Claude 审查 + 评论 + artifact |
+| `auto-fix` | 未跳过 + 可修复 | 自动修复并推送 |
+| `decision` | 始终运行 | 部署决策 + 自动合并 |
+
+**跳过审查：** PR 标题含 `[skip-review]` 等标签，或 PR 标签为 `skip-claude-review` / `skip-review` / `auto-merge-approved` 时，跳过 Claude 审查直接进入自动合并。详见 [SKIP-REVIEW.md](../SKIP-REVIEW.md)
+
+**并发控制：**
+- 同一 PR 分支的 workflow 排队执行，不会并行运行
+- `cancel-in-progress: false`（等待而非取消正在运行的实例）
+
 **功能：**
-- 使用 Claude Code 审查代码
+- 使用 Claude Code 审查代码（`claude-sonnet-4-6`）
 - 返回结构化的 JSON 审查结果
 - 自动评论审查报告到 PR
 - 添加相应的标签
 - 触发自动修复（如果需要）
+- 低风险 PR 自动合并
+
+**Artifact：**
+- 名称：`claude-review-result-pr-{number}-{run_id}`
+- 保留：7 天
 
 **使用的 Secrets：**
 - `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`
@@ -27,7 +47,7 @@
 **功能：**
 - 构建 Vue 应用
 - 验证构建完整性
-- 备份构建产物
+- 备份构建产物（artifact 保留 7 天）
 - 部署到 GitHub Pages
 - 健康检查
 - 创建部署标签
@@ -106,6 +126,24 @@ PR 审查和自动修复还需要：
 - 有效的 Claude API 认证
 - 足够的 API quota
 
+### 临时文件
+
+脚本使用 PR 编号 + Run ID 创建唯一临时文件前缀：
+
+```bash
+TMP_PREFIX="/tmp/pr-${PR_NUMBER}-${GITHUB_RUN_ID:-$$}"
+```
+
+Workflow 通过标准路径读取结果：
+- `/tmp/claude-review-result.json` — 审查 JSON 结果
+- `/tmp/fix-summary.txt` — 修复摘要
+
+### 自动修复冲突
+
+auto-fix job 推送前会检测远程分支：
+- 有新提交 → stash + rebase + stash pop
+- rebase 冲突 → 在 PR 评论并转人工处理
+
 ## 故障排查
 
 ### Workflow 失败
@@ -153,4 +191,5 @@ PR 审查和自动修复还需要：
 查看详细文档：
 - [CONFIG.md](../CONFIG.md) - 配置说明
 - [SETUP.md](../SETUP.md) - 设置指南
+- [SKIP-REVIEW.md](../SKIP-REVIEW.md) - 跳过审查指南
 - [FLOWCHARTS.md](../FLOWCHARTS.md) - 流程图

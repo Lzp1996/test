@@ -13,11 +13,12 @@
 - ✅ `claude-fix.sh` (2.1K) - 自动修复脚本
 - ✅ `quick-rollback.sh` (2.2K) - 本地快速回滚工具
 
-### 3. 完整文档 (7个)
+### 3. 完整文档 (8个)
 - ✅ `README.md` (7.5K) - 项目总览
 - ✅ `SETUP.md` (8.6K) - 快速启动指南
 - ✅ `CONFIG.md` (8.8K) - 详细配置文档
 - ✅ `AUTH.md` (6.5K) - 认证配置指南
+- ✅ `SKIP-REVIEW.md` - 跳过审查指南
 - ✅ `ROLLBACK.md` (8.3K) - 回滚操作指南
 - ✅ `FLOWCHARTS.md` (15K) - 系统流程图（7个流程图）
 - ✅ `workflows/README.md` (3.2K) - Workflows 使用说明
@@ -37,12 +38,19 @@
 - PR 自动触发 Claude Code headless 审查
 - 返回结构化 JSON 结果（包含风险级别、问题描述等）
 - 智能决策：低风险自动部署，中高风险人工审核
+- 支持跳过审查（标题/标签触发，见 SKIP-REVIEW.md）
 
 ### ✅ 自动修复机制
 - 识别可自动修复的问题（格式、lint 等）
 - Claude 自动修复并提交
-- 支持重试机制（最多 3 次）
-- 修复失败自动转人工审核
+- 支持重试机制（最多 3 次，lint 失败时 `git reset --hard` 回滚）
+- 推送前检测远程变更并尝试 rebase
+- 修复失败或冲突自动转人工审核
+
+### ✅ 并发安全
+- 同一 PR 分支 workflow 排队执行（concurrency 控制）
+- 临时文件使用 PR 编号 + Run ID 唯一命名
+- Artifact 命名包含 PR 编号和 Run ID
 
 ### ✅ 完整的回滚保护
 - 部署前自动备份构建产物
@@ -76,6 +84,7 @@
     ├── SETUP.md (快速启动)
     ├── CONFIG.md (详细配置)
     ├── AUTH.md (认证指南)
+    ├── SKIP-REVIEW.md (跳过审查)
     ├── ROLLBACK.md (回滚指南)
     ├── FLOWCHARTS.md (流程图)
     ├── workflows/
@@ -245,7 +254,7 @@ git push -u origin test/claude-review
 **安全保障：**
 - 构建验证
 - 健康检查
-- 自动备份（30天）
+- 自动备份（7天）
 - 一键回滚
 - 人工门槛（高风险）
 

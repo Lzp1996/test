@@ -7,6 +7,10 @@ PR_NUMBER=$2
 
 echo "🔧 Starting Claude Auto-Fix..."
 
+# 使用 PR 编号和 run ID 创建唯一的临时文件路径
+TMP_PREFIX="/tmp/pr-${PR_NUMBER}-${GITHUB_RUN_ID:-$$}"
+echo "📁 Using temp file prefix: ${TMP_PREFIX}"
+
 # 读取审查结果
 REVIEW_RESULT=$(cat "${REVIEW_RESULT_FILE}")
 MAX_ATTEMPTS=$(echo "${REVIEW_RESULT}" | jq -r '.max_fix_attempts')
@@ -22,7 +26,7 @@ if [ "${MAX_ATTEMPTS}" -eq 0 ]; then
 fi
 
 # 创建修复提示词
-cat > /tmp/fix-prompt.txt <<EOF
+cat > ${TMP_PREFIX}-fix-prompt.txt <<EOF
 You are an expert code fixer. Fix the following issues in the codebase:
 
 Issues to fix:
@@ -49,9 +53,9 @@ while [ ${ATTEMPT} -le ${MAX_ATTEMPTS} ]; do
   echo "🔄 Fix attempt ${ATTEMPT}/${MAX_ATTEMPTS}..."
 
   claude --headless --model claude-sonnet-4-6 \
-    --input /tmp/fix-prompt.txt \
-    --output /tmp/fix-result.txt \
-    2>&1 | tee /tmp/claude-fix.log
+    --input ${TMP_PREFIX}-fix-prompt.txt \
+    --output ${TMP_PREFIX}-fix-result.txt \
+    2>&1 | tee ${TMP_PREFIX}-claude-fix.log
 
   # 检查是否有文件被修改
   if git diff --quiet; then
@@ -67,17 +71,20 @@ while [ ${ATTEMPT} -le ${MAX_ATTEMPTS} ]; do
     break
   else
     echo "⚠️ Lint failed, attempting another fix..."
-    git checkout .  # 回滚更改
+    git reset --hard HEAD  # 使用 reset 代替 checkout 更安全
     ATTEMPT=$((ATTEMPT + 1))
   fi
 done
 
 if [ "${FIXED}" = true ]; then
   echo "✅ Auto-fix completed successfully"
-  cat /tmp/fix-result.txt > /tmp/fix-summary.txt
+  cat ${TMP_PREFIX}-fix-result.txt > ${TMP_PREFIX}-fix-summary.txt
+  # 复制到标准位置供 workflow 使用
+  cp ${TMP_PREFIX}-fix-summary.txt /tmp/fix-summary.txt
   echo "fixed=true" >> $GITHUB_OUTPUT
 else
   echo "❌ Auto-fix failed after ${MAX_ATTEMPTS} attempts"
-  echo "Auto-fix failed - needs manual intervention" > /tmp/fix-summary.txt
+  echo "Auto-fix failed - needs manual intervention" > ${TMP_PREFIX}-fix-summary.txt
+  cp ${TMP_PREFIX}-fix-summary.txt /tmp/fix-summary.txt
   echo "fixed=false" >> $GITHUB_OUTPUT
 fi

@@ -1,10 +1,112 @@
 # GitHub + Claude 自动化系统流程图
 
+## 0. 系统总流程图
+
+从 PR 提交到部署/回滚的端到端主路径，风险级别统一展示为 🟢 low / 🟡 medium / 🔴 high。
+
+```mermaid
+flowchart TB
+    subgraph PR["① PR 审查阶段 · pr-review.yml"]
+        A([开发者 创建/更新 PR]) --> B{跳过审查?}
+        B -->|"标题: [skip-review] [deploy-direct] [trusted]<br/>标签: skip-claude-review / skip-review / auto-merge-approved"| SKIP[⏭️ 跳过 Claude 审查]
+        B -->|否| AUTH{Claude 认证}
+        AUTH -->|ANTHROPIC_AUTH_TOKEN| REV[Claude Code 审查]
+        AUTH -->|ANTHROPIC_API_KEY| REV
+        AUTH -->|+ ANTHROPIC_BASE_URL 可选| REV
+        REV --> JSON[解析 JSON 审查结果]
+        JSON --> RISK{风险级别}
+        RISK --> LOW["🟢 low"]
+        RISK --> MED["🟡 medium"]
+        RISK --> HIGH["🔴 high"]
+        JSON --> PASS{审查通过?}
+        PASS -->|否 + 可自动修复| FIX[🔧 Claude 自动修复<br/>最多 3 次 · lint 验证]
+        FIX -->|成功 push| REV
+        FIX -->|失败/冲突| HUMAN
+        PASS -->|否 + 不可修复| FAIL[❌ review-failed]
+    end
+
+    subgraph DECIDE["② 部署决策 · decision job"]
+        SKIP --> D1[✅ auto-deploy-approved]
+        LOW --> D1
+        LOW -->|"passed + 🟢 low + 无需人工"| D1
+        MED -->|"passed + 🟡 medium"| D2[⚠️ needs-human-approval]
+        HIGH -->|"🔴 high 或 needs_human_review"| D3[🔴 needs-human-review]
+        FAIL --> D4[❌ review-failed]
+        D1 --> MERGE[自动 Squash 合并 PR]
+        D2 --> WAIT1[等待人工确认后合并]
+        D3 --> WAIT2[等待人工审核后合并]
+        WAIT1 -->|批准| MANUAL_MERGE[手动合并]
+        WAIT2 -->|批准| MANUAL_MERGE
+    end
+
+    subgraph DEPLOY["③ 部署阶段 · deploy.yml"]
+        MERGE --> CHECK{有 auto-deploy-approved?}
+        MANUAL_MERGE --> CHECK
+        PUSH([push master]) --> BUILD
+        CHECK -->|是| BUILD[构建 npm run build]
+        CHECK -->|否| SKIP_DEP[⏸️ 跳过自动部署]
+        BUILD --> VALID[验证 dist 产物]
+        VALID --> BACKUP[备份构建产物 7天]
+        BACKUP --> PAGES[部署 GitHub Pages]
+        PAGES --> HEALTH{HTTP 健康检查}
+        HEALTH -->|200| TAG[创建 deploy-* 标签]
+        HEALTH -->|失败| WARN[⚠️ 建议回滚]
+        TAG --> OK([✅ 部署成功])
+    end
+
+    subgraph ROLLBACK["④ 回滚 · rollback.yml / quick-rollback.sh"]
+        WARN --> RB{人工触发回滚}
+        RB -->|workflow_dispatch| RB1[回滚到 last / tag / commit]
+        RB -->|本地脚本| RB2[quick-rollback.sh]
+        RB1 --> RB_DEP[重新构建并部署]
+        RB2 --> RB_PR[创建回滚 PR 或直接部署]
+        RB_DEP --> RB_OK([✅ 回滚完成 rollback-* 标签])
+    end
+
+    style LOW fill:#d4edda
+    style MED fill:#fff3cd
+    style HIGH fill:#f8d7da
+    style D1 fill:#d4edda
+    style D2 fill:#fff3cd
+    style D3 fill:#f8d7da
+    style OK fill:#d4edda
+    style RB_OK fill:#d4edda
+```
+
+### 风险级别 → 自动化决策矩阵
+
+| 审查结果 | 风险级别 | 标签 | 后续动作 |
+|---------|---------|------|---------|
+| 跳过审查 | — | `auto-deploy-approved` | 自动合并 → 自动部署 |
+| 通过 | 🟢 low | `auto-deploy-approved` | 自动合并 → 自动部署 |
+| 通过 | 🟡 medium | `needs-human-approval` | 人工确认后合并 → 需带 `auto-deploy-approved` 才部署 |
+| 通过/未通过 | 🔴 high 或 `needs_human_review` | `needs-human-review` | 必须人工审核 |
+| 未通过且不可修复 | — | `review-failed` | 人工修复后重新提交 |
+
+### 风险级别判定标准（claude-review.sh）
+
+| 级别 | 典型变更 |
+|------|---------|
+| 🟢 **low** | 样式/CSS、文档、注释、非敏感配置微调、拼写修正 |
+| 🟡 **medium** | 非关键路径逻辑、有测试的新功能、重构、小版本依赖升级 |
+| 🔴 **high** | 安全/认证授权、数据库迁移、API 破坏性变更、大版本依赖升级 |
+
+### 并发与安全机制
+
+- 同一 PR 分支 `pr-review` workflow **排队执行**（不 cancel 进行中任务）
+- 临时文件命名：`/tmp/pr-{PR_NUMBER}-{RUN_ID}-*`
+- 自动修复 push 前 **fetch + rebase**，冲突则转人工
+- 审查/部署 artifact **保留 7 天**
+
+---
+
 ## 1. 整体架构流程图
 
 ```mermaid
 graph TB
-    Start([开发者提交 PR]) --> Auth{认证配置}
+    Start([开发者提交 PR]) --> SkipCheck{跳过标签?}
+    SkipCheck -->|是| AutoDeploy[✅ 自动部署]
+    SkipCheck -->|否| Auth{认证配置}
     Auth -->|ANTHROPIC_API_KEY| API[API Key 认证]
     Auth -->|ANTHROPIC_AUTH_TOKEN| Token[Auth Token 认证]
     Auth -->|中转服务| Proxy[代理服务认证]
@@ -17,16 +119,16 @@ graph TB
     JSON --> Risk[风险级别评估]
     JSON --> Pass{是否通过?}
     
-    Risk --> Low[🟢 Low Risk]
-    Risk --> Medium[🟡 Medium Risk]
-    Risk --> High[🔴 High Risk]
+    Risk --> Low["🟢 low"]
+    Risk --> Medium["🟡 medium"]
+    Risk --> High["🔴 high"]
     
     Pass -->|通过| CheckRisk{检查风险级别}
     Pass -->|未通过| CanFix{可自动修复?}
     
-    CheckRisk -->|Low + 通过| AutoDeploy[✅ 自动部署]
-    CheckRisk -->|Medium| NeedConfirm[⚠️ 需要人工确认]
-    CheckRisk -->|High| NeedReview[🔴 必须人工审核]
+    CheckRisk -->|"🟢 low + 通过"| AutoDeploy[✅ 自动部署]
+    CheckRisk -->|"🟡 medium"| NeedConfirm[⚠️ 需要人工确认]
+    CheckRisk -->|"🔴 high"| NeedReview[🔴 必须人工审核]
     
     CanFix -->|是| AutoFix[🔧 Claude 自动修复]
     CanFix -->|否| NeedReview
@@ -71,7 +173,14 @@ graph TB
 
 ```mermaid
 flowchart TD
-    PR[PR 创建/更新] --> Trigger[触发 pr-review.yml]
+    PR[PR 创建/更新] --> Concurrency{并发控制}
+    Concurrency -->|同分支排队| SkipCheck{check-skip-review}
+    SkipCheck -->|标题/标签匹配| SkipReview[跳过 Claude 审查]
+    SkipCheck -->|正常 PR| Trigger[触发 claude-review]
+    
+    SkipReview --> SkipComment[评论跳过原因]
+    SkipComment --> DecisionJob
+    
     Trigger --> Setup[安装 Claude Code CLI]
     Setup --> CheckAuth{检查认证}
     
@@ -98,22 +207,36 @@ flowchart TD
     
     CommentPR --> Decision[决策流程]
     Decision --> AddLabel[添加相应标签]
-    AddLabel --> SaveArtifact[保存审查结果]
+    AddLabel --> SaveArtifact[保存审查结果 7天]
     
     SaveArtifact --> CheckFix{需要自动修复?}
     CheckFix -->|是| AutoFixJob[触发 auto-fix job]
     CheckFix -->|否| DecisionJob[触发 decision job]
     
     AutoFixJob --> FixCode[Claude 修复代码]
-    FixCode --> Commit[提交修复]
-    Commit --> RePR[重新触发审查]
+    FixCode --> LintCheck{Lint 通过?}
+    LintCheck -->|否| ResetHard[git reset --hard 重试]
+    ResetHard --> FixCode
+    LintCheck -->|是| CheckRemote{远程有新提交?}
+    CheckRemote -->|是| Rebase[stash + rebase + stash pop]
+    Rebase --> RebaseOK{Rebase 成功?}
+    RebaseOK -->|否| Conflict[评论冲突, 转人工]
+    RebaseOK -->|是| Commit[提交修复]
+    CheckRemote -->|否| Commit
+    Commit --> Push[推送到远程]
+    Push --> RePR[重新触发审查]
     
     DecisionJob --> FinalDecision[最终决策]
-    FinalDecision --> Done([完成])
+    FinalDecision --> SkipMerge{跳过或低风险?}
+    SkipMerge -->|是| Merge[自动合并 PR]
+    SkipMerge -->|否| Done([完成])
+    Merge --> Done
     
+    style SkipReview fill:#ffeaa7
     style PR fill:#e1f5ff
     style ClaudeReview fill:#fff3cd
     style AutoFixJob fill:#ffeaa7
+    style Conflict fill:#f8d7da
     style Done fill:#d4edda
     style AuthFail fill:#f8d7da
 ```
@@ -158,7 +281,7 @@ flowchart TD
     HealthResult -->|其他| HealthFail[⚠️ 健康检查失败]
     
     HealthPass --> CreateTag[创建 deploy-* 标签]
-    CreateTag --> SaveBackup[保存备份 30天]
+    CreateTag --> SaveBackup[保存备份 7天]
     SaveBackup --> NotifySuccess[通知部署成功]
     NotifySuccess --> DeploySuccess([✅ 部署完成])
     
@@ -323,14 +446,18 @@ flowchart TD
 
 ```mermaid
 graph TB
-    Start{审查结果} --> CheckPassed{是否通过?}
+    Entry{PR 提交} --> SkipCheck{跳过标签?}
+    SkipCheck -->|是| SkipDeploy[✅ 跳过审查 - 自动部署]
+    SkipCheck -->|否| Start{审查结果}
+    
+    Start --> CheckPassed{是否通过?}
     
     CheckPassed -->|通过| CheckRisk{风险级别}
     CheckPassed -->|未通过| CheckFix{可自动修复?}
     
-    CheckRisk -->|Low| CheckHuman1{需要人工?}
-    CheckRisk -->|Medium| Medium[🟡 中等风险]
-    CheckRisk -->|High| High[🔴 高风险]
+    CheckRisk -->|🟢 low| CheckHuman1{需要人工?}
+    CheckRisk -->|🟡 medium| Medium["🟡 medium · 需要人工确认"]
+    CheckRisk -->|🔴 high| High["🔴 high · 必须人工审核"]
     
     CheckHuman1 -->|否| AutoDeploy[✅ 自动部署]
     CheckHuman1 -->|是| NeedReview[需要审核]
@@ -352,6 +479,9 @@ graph TB
     DecreaseAttempt -->|否| NeedReview
     
     ReReview --> Start
+    
+    SkipDeploy --> LabelSkip[添加 auto-deploy-approved]
+    LabelSkip --> MergeSkip[自动合并 PR]
     
     AutoDeploy --> Label1[添加 auto-deploy-approved]
     Confirm --> Label2[添加 needs-human-approval]

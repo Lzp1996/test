@@ -9,10 +9,13 @@
 ```
 PR 创建
     ↓
-Claude 审查（返回风险级别）
+check-skip-review（检查跳过标签）
     ↓
-风险判断
-    ↓
+    ├─ 跳过标签 → 直接 auto-deploy-approved → 自动合并 ✅
+    └─ 正常 PR → Claude 审查（返回风险级别）
+                    ↓
+               风险判断
+                    ↓
     ├─ 低风险 + 通过 → 自动合并 PR → 自动部署 ✅
     ├─ 中等风险 → 添加标签，等待人工确认 ⚠️
     └─ 高风险 → 添加标签，必须人工审核 🔴
@@ -20,11 +23,22 @@ Claude 审查（返回风险级别）
 
 ## 📋 自动合并条件
 
-PR 会**自动合并**当且仅当：
+PR 会**自动合并**当且仅当满足以下**任一**路径：
+
+### 路径 A：跳过审查
+
+PR 标题或标签包含跳过标记（见 [SKIP-REVIEW.md](./SKIP-REVIEW.md)）：
+- 标题：`[skip-review]`、`[deploy-direct]`、`[trusted]`
+- 标签：`skip-claude-review`、`skip-review`、`auto-merge-approved`
+
+### 路径 B：正常审查通过
 
 1. ✅ **审查通过** - `passed: true`
 2. ✅ **低风险** - `risk_level: "low"`
 3. ✅ **无需人工** - `needs_human_review: false`
+
+### 共同条件
+
 4. ✅ **无冲突** - PR 可以干净合并
 5. ✅ **所有检查通过** - 其他 GitHub checks 通过（如果有）
 
@@ -178,6 +192,17 @@ if: |
 - ✅ 捕获所有合并错误
 - ✅ 失败时回退到人工审核
 - ✅ 详细的日志记录
+
+### 自动修复冲突处理
+
+自动修复推送前会检测远程分支状态：
+
+1. `git fetch` 获取远程最新提交
+2. 若远程有新提交 → `stash` → `rebase` → `stash pop`
+3. rebase 成功 → 提交并推送修复
+4. rebase 冲突或推送失败 → 在 PR 中评论「自动修复冲突」，转人工处理
+
+**不会**强制覆盖远程分支上的他人提交。
 
 ### 审计追踪
 
@@ -334,6 +359,7 @@ Settings → Branches → Branch protection rules → master
 ## 📚 相关文档
 
 - [CONFIG.md](./CONFIG.md) - 完整配置说明
+- [SKIP-REVIEW.md](./SKIP-REVIEW.md) - 跳过审查指南
 - [ROLLBACK.md](./ROLLBACK.md) - 回滚操作
 - [FLOWCHARTS.md](./FLOWCHARTS.md) - 流程图
 

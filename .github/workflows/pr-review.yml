@@ -5,6 +5,11 @@ on:
     types: [opened, synchronize, reopened]
     branches: [master]
 
+# 并发控制：确保同一个 PR 分支不会有多个 workflow 同时运行
+concurrency:
+  group: pr-review-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: false  # 不取消正在运行的，而是排队等待
+
 # 权限：部署 Pages 需要
 permissions:
   contents: write
@@ -12,7 +17,76 @@ permissions:
   issues: write
 
 jobs:
+  check-skip-review:
+    runs-on: ubuntu-latest
+    outputs:
+      should-skip: ${{ steps.check.outputs.should-skip }}
+      skip-reason: ${{ steps.check.outputs.skip-reason }}
+
+    steps:
+      - name: Check if should skip Claude review
+        id: check
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prTitle = context.payload.pull_request.title;
+            const prNumber = context.payload.pull_request.number;
+
+            // 检查 PR 标题中的跳过标签
+            const titleTags = ['[skip-review]', '[deploy-direct]', '[trusted]'];
+            const hasTitleTag = titleTags.some(tag => prTitle.includes(tag));
+
+            // 检查 PR 标签
+            const { data: labels } = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber
+            });
+
+            const skipLabels = ['skip-claude-review', 'skip-review', 'auto-merge-approved'];
+            const hasSkipLabel = labels.some(label => skipLabels.includes(label.name));
+
+            // 判断是否跳过
+            const shouldSkip = hasTitleTag || hasSkipLabel;
+
+            let skipReason = '';
+            if (hasTitleTag) {
+              const matchedTag = titleTags.find(tag => prTitle.includes(tag));
+              skipReason = `PR 标题包含跳过标签: ${matchedTag}`;
+            } else if (hasSkipLabel) {
+              const matchedLabel = labels.find(label => skipLabels.includes(label.name));
+              skipReason = `PR 包含跳过标签: ${matchedLabel.name}`;
+            }
+
+            console.log(`Should skip review: ${shouldSkip}`);
+            console.log(`Reason: ${skipReason}`);
+
+            core.setOutput('should-skip', shouldSkip);
+            core.setOutput('skip-reason', skipReason);
+
+            // 如果跳过，添加评论说明
+            if (shouldSkip) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: `## ⏭️ 跳过 Claude 审查
+
+**原因**: ${skipReason}
+
+**注意**: 此 PR 已跳过自动代码审查，请确保：
+- ✅ 代码已经过人工审查
+- ✅ 测试已通过
+- ✅ 变更风险可控
+
+此 PR 将直接进入自动合并流程。`
+              });
+            }
+
   claude-review:
+    needs: check-skip-review
+    if: needs.check-skip-review.outputs.should-skip == 'false'
     runs-on: ubuntu-latest
     outputs:
       review-passed: ${{ steps.review-result.outputs.passed }}
@@ -65,16 +139,18 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com' }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
-          # 生成 diff 信息
-          git diff origin/${{ github.base_ref }}...${{ github.event.pull_request.head.sha }} > /tmp/pr-diff.txt
+          # 生成 diff 信息（使用唯一文件名）
+          TMP_PREFIX="/tmp/pr-${{ github.event.pull_request.number }}-${{ github.run_id }}"
+          git diff origin/${{ github.base_ref }}...${{ github.event.pull_request.head.sha }} > ${TMP_PREFIX}-pr-diff.txt
 
           # 运行 Claude Code headless 审查
           bash .github/scripts/claude-review.sh \
             "${{ github.event.pull_request.number }}" \
             "${{ github.event.pull_request.title }}" \
             "${{ github.event.pull_request.user.login }}" \
-            "/tmp/pr-diff.txt"
+            "${TMP_PREFIX}-pr-diff.txt"
 
       - name: Parse Review Result
         id: review-result
@@ -137,13 +213,14 @@ jobs:
       - name: Upload Review Result
         uses: actions/upload-artifact@v4
         with:
-          name: claude-review-result
+          name: claude-review-result-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
           path: /tmp/review-summary.json
-          retention-days: 30
+          retention-days: 7  # 减少存储时间
 
   auto-fix:
-    needs: claude-review
+    needs: [check-skip-review, claude-review]
     if: |
+      needs.check-skip-review.outputs.should-skip == 'false' &&
       needs.claude-review.outputs.review-passed == 'false' &&
       needs.claude-review.outputs.can-auto-fix == 'true' &&
       needs.claude-review.outputs.needs-human == 'false'
@@ -167,7 +244,7 @@ jobs:
       - name: Download Review Result
         uses: actions/download-artifact@v4
         with:
-          name: claude-review-result
+          name: claude-review-result-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
           path: /tmp
 
       - name: Auto Fix Issues
@@ -176,6 +253,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com' }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           bash .github/scripts/claude-fix.sh \
             "/tmp/review-summary.json" \
@@ -184,11 +262,48 @@ jobs:
       - name: Commit and Push Fixes
         if: steps.auto-fix.outputs.fixed == 'true'
         run: |
+          # 获取远程最新状态
+          git fetch origin ${{ github.event.pull_request.head.ref }}
+
+          # 检查远程是否有新的提交
+          LOCAL_COMMIT=$(git rev-parse HEAD)
+          REMOTE_COMMIT=$(git rev-parse origin/${{ github.event.pull_request.head.ref }})
+
+          if [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
+            echo "⚠️ Remote branch has new commits, attempting rebase..."
+
+            # 暂存当前修改
+            git stash push -m "Claude auto-fix changes"
+
+            # 拉取远程更改
+            git pull --rebase origin ${{ github.event.pull_request.head.ref }}
+
+            # 应用暂存的修改
+            if git stash pop; then
+              echo "✅ Rebase successful, changes applied"
+            else
+              echo "❌ Rebase conflict detected, aborting auto-fix"
+              git rebase --abort
+              git stash drop
+              echo "conflict=true" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          fi
+
+          # 提交修复
           git config --local user.email "claude-bot@github.actions"
           git config --local user.name "Claude Bot"
           git add .
           git commit -m "🤖 Claude auto-fix: $(cat /tmp/fix-summary.txt)"
-          git push
+
+          # 推送时再次检查
+          if git push origin HEAD:${{ github.event.pull_request.head.ref }}; then
+            echo "✅ Push successful"
+          else
+            echo "❌ Push failed, likely due to concurrent changes"
+            echo "conflict=true" >> $GITHUB_OUTPUT
+            exit 1
+          fi
 
       - name: Comment Fix Result
         uses: actions/github-script@v7
@@ -197,10 +312,16 @@ jobs:
           script: |
             const fs = require('fs');
             const fixed = '${{ steps.auto-fix.outputs.fixed }}' === 'true';
+            const conflict = '${{ steps.auto-fix.outputs.conflict }}' === 'true';
 
-            const body = fixed
-              ? `## 🔧 Claude 自动修复完成\n\n已自动修复代码问题并提交，请重新触发审查流程。\n\n修复内容:\n${fs.readFileSync('/tmp/fix-summary.txt', 'utf8')}`
-              : `## ⚠️ 自动修复失败\n\n无法自动修复问题，需要人工介入。`;
+            let body;
+            if (conflict) {
+              body = `## ⚠️ 自动修复冲突\n\n在推送修复时检测到远程分支有新的提交，无法自动应用修复。\n\n**原因**: 可能有其他提交被推送到了同一分支。\n\n**建议**: 请手动解决冲突或重新触发审查流程。`;
+            } else if (fixed) {
+              body = `## 🔧 Claude 自动修复完成\n\n已自动修复代码问题并提交，请重新触发审查流程。\n\n修复内容:\n${fs.readFileSync('/tmp/fix-summary.txt', 'utf8')}`;
+            } else {
+              body = `## ⚠️ 自动修复失败\n\n无法自动修复问题，需要人工介入。`;
+            }
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -210,7 +331,8 @@ jobs:
             });
 
   decision:
-    needs: claude-review
+    needs: [check-skip-review, claude-review]
+    if: always() && !cancelled()
     runs-on: ubuntu-latest
 
     steps:
@@ -220,27 +342,38 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const passed = '${{ needs.claude-review.outputs.review-passed }}' === 'true';
-            const risk = '${{ needs.claude-review.outputs.risk-level }}';
-            const needsHuman = '${{ needs.claude-review.outputs.needs-human }}' === 'true';
+            const shouldSkip = '${{ needs.check-skip-review.outputs.should-skip }}' === 'true';
+            const skipReason = '${{ needs.check-skip-review.outputs.skip-reason }}';
 
             let decision = '';
             let label = '';
             let autoMerge = false;
 
-            if (passed && risk === 'low' && !needsHuman) {
-              decision = '✅ **自动部署**: 低风险变更，审查通过，将自动合并并部署';
+            // 如果跳过审查，直接批准自动部署
+            if (shouldSkip) {
+              decision = `✅ **跳过审查 - 自动部署**: ${skipReason}`;
               label = 'auto-deploy-approved';
               autoMerge = true;
-            } else if (passed && risk === 'medium') {
-              decision = '⚠️ **需要确认**: 中等风险变更，请人工确认后合并';
-              label = 'needs-human-approval';
-            } else if (risk === 'high' || needsHuman) {
-              decision = '🔴 **必须人工审核**: 高风险变更或复杂修改，需要详细审查';
-              label = 'needs-human-review';
             } else {
-              decision = '❌ **审查未通过**: 代码存在问题，请修复后重新提交';
-              label = 'review-failed';
+              // 正常审查流程
+              const passed = '${{ needs.claude-review.outputs.review-passed }}' === 'true';
+              const risk = '${{ needs.claude-review.outputs.risk-level }}';
+              const needsHuman = '${{ needs.claude-review.outputs.needs-human }}' === 'true';
+
+              if (passed && risk === 'low' && !needsHuman) {
+                decision = '✅ **自动部署**: 低风险变更，审查通过，将自动合并并部署';
+                label = 'auto-deploy-approved';
+                autoMerge = true;
+              } else if (passed && risk === 'medium') {
+                decision = '⚠️ **需要确认**: 中等风险变更，请人工确认后合并';
+                label = 'needs-human-approval';
+              } else if (risk === 'high' || needsHuman) {
+                decision = '🔴 **必须人工审核**: 高风险变更或复杂修改，需要详细审查';
+                label = 'needs-human-review';
+              } else {
+                decision = '❌ **审查未通过**: 代码存在问题，请修复后重新提交';
+                label = 'review-failed';
+              }
             }
 
             // 添加标签
