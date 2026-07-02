@@ -27,7 +27,7 @@ jobs:
     steps:
       - name: Check if should skip Claude review
         id: check
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -169,7 +169,7 @@ jobs:
           echo "needs-human=$(jq -r '.needs_human_review' /tmp/review-summary.json)" >> $GITHUB_OUTPUT
 
       - name: Comment Review Result on PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -217,7 +217,7 @@ jobs:
             });
 
       - name: Upload Review Result
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: claude-review-result-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
           path: /tmp/review-summary.json
@@ -248,7 +248,7 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code
 
       - name: Download Review Result
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: claude-review-result-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
           path: /tmp
@@ -312,7 +312,7 @@ jobs:
           fi
 
       - name: Comment Fix Result
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -344,7 +344,7 @@ jobs:
     steps:
       - name: Make Deployment Decision
         id: make-decision
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -403,7 +403,7 @@ jobs:
 
       - name: Auto-merge PR (low risk only)
         if: steps.make-decision.outputs.auto-merge == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |

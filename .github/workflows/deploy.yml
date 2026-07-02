@@ -1,68 +1,29 @@
 name: Deploy Vue to GitHub Pages
 
-# 什么时候触发
+# 部署架构（避免 deployment_queued）：
+# - 使用 peaceiris 将 dist/ 推送到 gh-pages 分支（git push，不走 deploy-pages API）
+# - GitHub Pages 源必须设为：Deploy from a branch → gh-pages / (root)
+# - 不要创建 github-pages Environment（会触发 deploy-pages 并卡在 deployment_queued）
+# - 忽略 Actions 里的「pages build and deployment」，只看本 workflow 是否成功
+
 on:
   push:
-    branches: [master]   # push 到 master 分支时触发
-  pull_request:
-    types: [closed]      # PR 合并后触发
-  workflow_dispatch:   # 允许在 GitHub 网页手动点「Run workflow」
+    branches: [master]
+  workflow_dispatch:
 
-# 权限：push gh-pages 分支部署
+# 权限：peaceiris 只需写 contents（推 gh-pages 分支）
 permissions:
   contents: write
 
-# 只允许一个部署任务同时跑，避免冲突
+# 与 GitHub 内置 pages-build-deployment 使用不同 concurrency group，避免互相取消
 concurrency:
-  group: pages
+  group: deploy-vue-pages
   cancel-in-progress: true
 
 jobs:
-  # 检查是否允许自动部署
-  check-approval:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
-    outputs:
-      should-deploy: ${{ steps.check.outputs.should-deploy }}
-
-    steps:
-      - name: Check Auto-Deploy Approval
-        id: check
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const { data: labels } = await github.rest.issues.listLabelsOnIssue({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number
-            });
-
-            const hasAutoDeployLabel = labels.some(label =>
-              label.name === 'auto-deploy-approved'
-            );
-
-            const shouldDeploy = hasAutoDeployLabel || context.eventName === 'push';
-            console.log(`Should deploy: ${shouldDeploy}`);
-            core.setOutput('should-deploy', shouldDeploy);
-
-            if (!shouldDeploy) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: '⏸️ 自动部署已跳过 - 此PR需要人工审核批准后才能部署'
-              });
-            }
-
   build-and-deploy:
-    needs: [check-approval]
-    if: |
-      always() &&
-      (github.event_name == 'push' ||
-       github.event_name == 'workflow_dispatch' ||
-       (needs.check-approval.outputs.should-deploy == 'true'))
-    runs-on: ubuntu-latest   # 在 GitHub 提供的 Linux 虚拟机上跑
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
 
     steps:
       # 1. 拉取代码
@@ -156,8 +117,8 @@ jobs:
           publish_branch: gh-pages
           commit_message: "deploy: ${{ github.sha }}"
 
-      # 9. 检查部署状态
-      - name: Check deployment status
+      # 9. 确认 peaceiris 推送结果
+      - name: Verify peaceiris deploy
         id: deploy-check
         run: |
           if [ "${{ steps.deployment.outcome }}" == "success" ]; then
@@ -176,8 +137,8 @@ jobs:
         run: |
           echo "🏥 Running health check..."
 
-          # 等待部署生效
-          sleep 10
+          # 等待 gh-pages 分支更新后在 CDN 生效
+          sleep 30
 
           # 获取部署 URL
           DEPLOY_URL="https://${{ github.repository_owner }}.github.io/test/"
@@ -222,7 +183,7 @@ jobs:
         if: |
           steps.deploy-check.outputs.deploy-success == 'true' &&
           steps.health-check.outputs.health-success == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: deployment-backup-${{ github.sha }}-${{ github.run_id }}
           path: /tmp/build-backup.tar.gz
@@ -246,7 +207,7 @@ jobs:
       # 16. 部署结果通知
       - name: Deployment result notification
         if: always()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -290,16 +251,7 @@ jobs:
             ` : ''}
             `;
 
-            // 如果是 PR 触发的，在 PR 中评论
-            if (context.eventName === 'pull_request') {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: body
-              });
-            }
-
+            // deploy 仅由 push / workflow_dispatch 触发，PR 合并在 pr-review 中 dispatch
             console.log(body);
 
       # 17. 失败时退出

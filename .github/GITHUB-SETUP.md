@@ -154,27 +154,32 @@ gh label create "auto-merge-approved" --color "0075CA" --description "Trigger sk
 
 ---
 
-## 4️⃣ GitHub Pages 配置（如果使用 Pages 部署）
+## 4️⃣ GitHub Pages 配置（必须使用分支部署）
 
 进入：**Settings → Pages**
 
-### 设置
+### 设置（与 deploy.yml 的 peaceiris 方式一致）
 
 ```
-Source: GitHub Actions
-  └─ (不选择 Deploy from a branch)
-
-Custom domain: (可选)
-  └─ 如果有自定义域名
+Source: Deploy from a branch
+Branch: gh-pages
+Folder: / (root)
 
 Enforce HTTPS: ☑ (建议开启)
 ```
 
+### ⚠️ 不要使用的配置
+
+```
+Source: GitHub Actions   ← 会触发 deploy-pages，卡在 deployment_queued
+```
+
 ### 说明
 
-- `deploy.yml` workflow 会自动处理部署
-- 不需要手动配置 deploy 分支
-- 首次部署后会显示 URL
+- `deploy.yml` 用 peaceiris 将构建产物推送到 `gh-pages` 分支
+- Pages 源必须是 **gh-pages 分支**，不能选 GitHub Actions
+- Actions 里可能出现「pages build and deployment」，卡住可 Cancel，**以 Deploy Vue to GitHub Pages 为准**
+- **不要**创建 `github-pages` Environment（Settings → Environments），否则会走 deploy-pages API
 
 ---
 
@@ -209,22 +214,11 @@ Branch name pattern: master
 
 ---
 
-## 6️⃣ GitHub Actions 环境配置（可选）
+## 6️⃣ GitHub Actions 环境配置
 
-进入：**Settings → Environments → New environment**
+**不需要**创建 `github-pages` Environment。
 
-### 创建 github-pages 环境
-
-```
-Environment name: github-pages
-
-Deployment branches:
-  ◉ Selected branches
-  └─ Add: master
-
-Environment secrets: (可选)
-  └─ 如果需要环境特定的 secrets
-```
+若之前已创建，请到 **Settings → Environments** 删除 `github-pages`，否则可能触发 `deploy-pages` 并卡在 `deployment_queued`。
 
 ---
 
@@ -291,7 +285,8 @@ git push -u origin test/auto-deploy
   - [ ] 跳过审查标签（可选，见 SKIP-REVIEW.md）
   
 - [ ] **Pages 配置**（如果使用）
-  - [ ] Source 设置为 GitHub Actions
+  - [ ] Source 设置为 Deploy from a branch → gh-pages / (root)
+  - [ ] 未创建 github-pages Environment
   
 - [ ] **分支保护**（如果启用）
   - [ ] github-actions[bot] 已添加到 bypass 列表
@@ -334,7 +329,8 @@ echo "   - 启用 Read and write permissions"
 echo "   - 勾选 Allow create and approve pull requests"
 echo ""
 echo "2. Settings → Pages"
-echo "   - Source: GitHub Actions"
+echo "   - Source: Deploy from a branch → gh-pages / (root)"
+echo "   - 不要选 GitHub Actions"
 echo ""
 echo "3. 运行测试："
 echo "   gh workflow run test-secrets.yml"
