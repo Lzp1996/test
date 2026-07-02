@@ -154,32 +154,24 @@ gh label create "auto-merge-approved" --color "0075CA" --description "Trigger sk
 
 ---
 
-## 4️⃣ GitHub Pages 配置（必须使用分支部署）
+## 4️⃣ GitHub Pages 配置（必须使用 GitHub Actions 源）
 
 进入：**Settings → Pages**
 
-### 设置（与 deploy.yml 的 peaceiris 方式一致）
+### 设置
 
 ```
-Source: Deploy from a branch
-Branch: gh-pages
-Folder: / (root)
+Source: GitHub Actions
+  └─ 不要选 Deploy from a branch
 
 Enforce HTTPS: ☑ (建议开启)
 ```
 
-### ⚠️ 不要使用的配置
-
-```
-Source: GitHub Actions   ← 会触发 deploy-pages，卡在 deployment_queued
-```
-
 ### 说明
 
-- `deploy.yml` 用 peaceiris 将构建产物推送到 `gh-pages` 分支
-- Pages 源必须是 **gh-pages 分支**，不能选 GitHub Actions
-- Actions 里可能出现「pages build and deployment」，卡住可 Cancel，**以 Deploy Vue to GitHub Pages 为准**
-- **不要**创建 `github-pages` Environment（Settings → Environments），否则会走 deploy-pages API
+- `deploy.yml` 使用官方 `upload-pages-artifact` + `deploy-pages` 部署
+- **不要**再使用 `gh-pages` 分支作为 Pages 源（会与 Actions 部署冲突并导致 deployment_queued 循环）
+- 部署成功后网站 URL：`https://<username>.github.io/test/`
 
 ---
 
@@ -216,9 +208,7 @@ Branch name pattern: master
 
 ## 6️⃣ GitHub Actions 环境配置
 
-**不需要**创建 `github-pages` Environment。
-
-若之前已创建，请到 **Settings → Environments** 删除 `github-pages`，否则可能触发 `deploy-pages` 并卡在 `deployment_queued`。
+`deploy.yml` 会使用 **`github-pages` Environment**（由 GitHub Pages 自动提供，无需手动创建配置）。
 
 ---
 
@@ -285,8 +275,7 @@ git push -u origin test/auto-deploy
   - [ ] 跳过审查标签（可选，见 SKIP-REVIEW.md）
   
 - [ ] **Pages 配置**（如果使用）
-  - [ ] Source 设置为 Deploy from a branch → gh-pages / (root)
-  - [ ] 未创建 github-pages Environment
+  - [ ] Source 设置为 **GitHub Actions**（不要选 gh-pages 分支）
   
 - [ ] **分支保护**（如果启用）
   - [ ] github-actions[bot] 已添加到 bypass 列表
@@ -329,8 +318,7 @@ echo "   - 启用 Read and write permissions"
 echo "   - 勾选 Allow create and approve pull requests"
 echo ""
 echo "2. Settings → Pages"
-echo "   - Source: Deploy from a branch → gh-pages / (root)"
-echo "   - 不要选 GitHub Actions"
+echo "   - Source: GitHub Actions"
 echo ""
 echo "3. 运行测试："
 echo "   gh workflow run test-secrets.yml"

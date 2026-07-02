@@ -1,262 +1,94 @@
 name: Deploy Vue to GitHub Pages
 
-# 部署架构（避免 deployment_queued）：
-# - 使用 peaceiris 将 dist/ 推送到 gh-pages 分支（git push，不走 deploy-pages API）
-# - GitHub Pages 源必须设为：Deploy from a branch → gh-pages / (root)
-# - 不要创建 github-pages Environment（会触发 deploy-pages 并卡在 deployment_queued）
-# - 忽略 Actions 里的「pages build and deployment」，只看本 workflow 是否成功
+# 单路径部署（避免 peaceiris + pages-build-deployment 双轨冲突）：
+# - Pages 源必须设为：GitHub Actions（Settings → Pages → Source）
+# - 本 workflow 负责 build → upload artifact → deploy-pages
+# - 不再 push gh-pages 分支，避免触发卡死的 pages-build-deployment 循环
 
 on:
   push:
     branches: [master]
   workflow_dispatch:
 
-# 权限：peaceiris 只需写 contents（推 gh-pages 分支）
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
-# 与 GitHub 内置 pages-build-deployment 使用不同 concurrency group，避免互相取消
+# 不 cancel 进行中的 Pages 部署，避免 deployment 锁死
 concurrency:
-  group: deploy-vue-pages
-  cancel-in-progress: true
+  group: pages-deploy
+  cancel-in-progress: false
 
 jobs:
-  build-and-deploy:
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+  deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      # 1. 拉取代码
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # 获取完整历史以便回滚
+          fetch-depth: 0
 
-      # 2. 获取上一次成功部署的信息
       - name: Get last successful deployment
         id: last-deploy
         run: |
-          # 获取最后一个部署标签
           LAST_TAG=$(git tag -l "deploy-*" --sort=-version:refname | head -n 1)
-
           if [ -n "$LAST_TAG" ]; then
             echo "last-tag=$LAST_TAG" >> $GITHUB_OUTPUT
-            LAST_COMMIT=$(git rev-list -n 1 $LAST_TAG)
-            echo "last-commit=$LAST_COMMIT" >> $GITHUB_OUTPUT
-            echo "📦 Last successful deployment: $LAST_TAG (commit: ${LAST_COMMIT:0:7})"
+            echo "last-commit=$(git rev-list -n 1 $LAST_TAG)" >> $GITHUB_OUTPUT
           else
             echo "last-tag=" >> $GITHUB_OUTPUT
             echo "last-commit=" >> $GITHUB_OUTPUT
-            echo "ℹ️  No previous deployment found"
           fi
 
-      # 3. 安装 Node.js
       - name: Setup Node
         uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
 
-      # 4. 安装依赖
       - name: Install dependencies
         run: npm ci
 
-      # 5. 构建
       - name: Build
-        id: build
-        run: |
-          echo "🔨 Building application..."
-          npm run build
+        run: npm run build
 
-          if [ $? -eq 0 ]; then
-            echo "✅ Build successful"
-            echo "build-success=true" >> $GITHUB_OUTPUT
-          else
-            echo "❌ Build failed"
-            echo "build-success=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-
-      # 6. 备份当前构建产物
-      - name: Backup build artifacts
-        if: steps.build.outputs.build-success == 'true'
-        run: |
-          echo "💾 Backing up build artifacts..."
-          tar -czf /tmp/build-backup.tar.gz dist/
-          echo "✅ Build artifacts backed up"
-
-      # 7. 运行构建验证（可选）
       - name: Validate build
-        if: steps.build.outputs.build-success == 'true'
         run: |
-          echo "🔍 Validating build..."
+          test -f dist/index.html
+          test "$(du -sb dist/ | cut -f1)" -ge 1024
 
-          # 检查关键文件是否存在
-          if [ ! -f "dist/index.html" ]; then
-            echo "❌ index.html not found in dist/"
-            exit 1
-          fi
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
 
-          # 检查构建产物大小（防止空构建）
-          BUILD_SIZE=$(du -sb dist/ | cut -f1)
-          if [ "$BUILD_SIZE" -lt 1024 ]; then
-            echo "❌ Build size too small: ${BUILD_SIZE} bytes"
-            exit 1
-          fi
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ./dist
 
-          echo "✅ Build validation passed (size: ${BUILD_SIZE} bytes)"
-
-      # 8. 部署到 GitHub Pages（git push，不走 Deployment API，避免 deployment_queued）
       - name: Deploy to GitHub Pages
         id: deployment
-        if: steps.build.outputs.build-success == 'true'
-        uses: peaceiris/actions-gh-pages@v4
+        uses: actions/deploy-pages@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./dist
-          publish_branch: gh-pages
-          commit_message: "deploy: ${{ github.sha }}"
+          timeout: 600000
 
-      # 9. 确认 peaceiris 推送结果
-      - name: Verify peaceiris deploy
-        id: deploy-check
-        run: |
-          if [ "${{ steps.deployment.outcome }}" == "success" ]; then
-            echo "✅ Deployment successful"
-            echo "deploy-success=true" >> $GITHUB_OUTPUT
-          else
-            echo "❌ Deployment failed"
-            echo "deploy-success=false" >> $GITHUB_OUTPUT
-          fi
-
-      # 10. 运行健康检查（可选）
       - name: Health check
-        id: health-check
-        if: steps.deploy-check.outputs.deploy-success == 'true'
         continue-on-error: true
         run: |
-          echo "🏥 Running health check..."
+          sleep 15
+          URL="${{ steps.deployment.outputs.page_url }}"
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo "000")
+          test "$CODE" = "200"
 
-          # 等待 gh-pages 分支更新后在 CDN 生效
-          sleep 30
-
-          # 获取部署 URL
-          DEPLOY_URL="https://${{ github.repository_owner }}.github.io/test/"
-
-          if [ -z "$DEPLOY_URL" ]; then
-            echo "⚠️  Deploy URL not available, skipping health check"
-            echo "health-success=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # 检查页面是否可访问
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$DEPLOY_URL" || echo "000")
-
-          if [ "$HTTP_CODE" == "200" ]; then
-            echo "✅ Health check passed (HTTP $HTTP_CODE)"
-            echo "health-success=true" >> $GITHUB_OUTPUT
-          else
-            echo "❌ Health check failed (HTTP $HTTP_CODE)"
-            echo "health-success=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-
-      # 13. 创建部署标签（仅当部署和健康检查都成功）
       - name: Tag successful deployment
-        if: |
-          steps.deploy-check.outputs.deploy-success == 'true' &&
-          steps.health-check.outputs.health-success == 'true'
+        if: success()
         run: |
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          TAG_NAME="deploy-${TIMESTAMP}"
-
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "GitHub Actions"
-
-          git tag -a "$TAG_NAME" -m "Successful deployment at ${TIMESTAMP}"
+          TAG_NAME="deploy-$(date +%Y%m%d-%H%M%S)"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git tag -a "$TAG_NAME" -m "Successful deployment at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git push origin "$TAG_NAME"
-
-          echo "✅ Created deployment tag: $TAG_NAME"
-
-      # 14. 保存部署备份
-      - name: Save deployment backup
-        if: |
-          steps.deploy-check.outputs.deploy-success == 'true' &&
-          steps.health-check.outputs.health-success == 'true'
-        uses: actions/upload-artifact@v5
-        with:
-          name: deployment-backup-${{ github.sha }}-${{ github.run_id }}
-          path: /tmp/build-backup.tar.gz
-          retention-days: 7  # 减少存储时间
-
-      # 15. 处理部署失败 - 自动回滚
-      - name: Rollback on deployment failure
-        if: |
-          failure() &&
-          steps.last-deploy.outputs.last-tag != ''
-        run: |
-          echo "🔄 Deployment failed, initiating rollback..."
-          echo "Rolling back to: ${{ steps.last-deploy.outputs.last-tag }}"
-
-          # 注意：GitHub Pages 的回滚需要重新部署上一个版本
-          # 这里创建一个 workflow dispatch 事件来触发回滚
-          echo "⚠️  Automatic rollback requires manual trigger"
-          echo "Please run the 'Rollback Deployment' workflow"
-          echo "Target: ${{ steps.last-deploy.outputs.last-tag }}"
-
-      # 16. 部署结果通知
-      - name: Deployment result notification
-        if: always()
-        uses: actions/github-script@v8
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const deploySuccess = '${{ steps.deploy-check.outputs.deploy-success }}' === 'true';
-            const healthSuccess = '${{ steps.health-check.outputs.health-success }}' === 'true';
-            const lastTag = '${{ steps.last-deploy.outputs.last-tag }}';
-
-            let status = '';
-            let emoji = '';
-            let message = '';
-
-            if (deploySuccess && healthSuccess) {
-              status = '成功';
-              emoji = '✅';
-              message = '部署成功并通过健康检查';
-            } else if (deploySuccess && !healthSuccess) {
-              status = '警告';
-              emoji = '⚠️';
-              message = '部署成功但健康检查失败，建议回滚';
-            } else {
-              status = '失败';
-              emoji = '❌';
-              message = '部署失败';
-              if (lastTag) {
-                message += `，可以回滚到 ${lastTag}`;
-              }
-            }
-
-            const body = `## ${emoji} 部署${status}
-
-            **状态**: ${message}
-            **Commit**: ${context.sha.substring(0, 7)}
-            **部署 URL**: https://${{ github.repository_owner }}.github.io/test/
-
-            ${!deploySuccess && lastTag ? `
-            ### 🔄 回滚指南
-
-            可以运行 \`Rollback Deployment\` workflow 回滚到上一个版本：
-            - 标签: \`${lastTag}\`
-            - Commit: \`${{ steps.last-deploy.outputs.last-commit }}\`
-            ` : ''}
-            `;
-
-            // deploy 仅由 push / workflow_dispatch 触发，PR 合并在 pr-review 中 dispatch
-            console.log(body);
-
-      # 17. 失败时退出
-      - name: Fail workflow on deployment failure
-        if: steps.deploy-check.outputs.deploy-success != 'true'
-        run: |
-          echo "❌ Workflow failed due to deployment failure"
-          exit 1

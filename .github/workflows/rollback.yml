@@ -16,45 +16,42 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
-  group: deploy-vue-pages
-  cancel-in-progress: true
+  group: pages-deploy
+  cancel-in-progress: false
 
 jobs:
   rollback:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # 获取完整历史
+          fetch-depth: 0
 
       - name: Determine rollback target
         id: target
         run: |
           TARGET="${{ github.event.inputs.target }}"
 
-          echo "🔍 Determining rollback target: $TARGET"
-
-          if [ "$TARGET" == "last" ]; then
-            # 获取最后一个成功部署的标签
+          if [ "$TARGET" = "last" ]; then
             LAST_TAG=$(git tag -l "deploy-*" --sort=-version:refname | head -n 1)
-
             if [ -z "$LAST_TAG" ]; then
               echo "❌ No previous deployment tag found"
               exit 1
             fi
-
-            echo "✅ Found last deployment: $LAST_TAG"
             TARGET_REF="$LAST_TAG"
             TARGET_COMMIT=$(git rev-list -n 1 "$LAST_TAG")
           elif git rev-parse "$TARGET" >/dev/null 2>&1; then
-            # 验证是否是有效的 commit/tag
             TARGET_REF="$TARGET"
             TARGET_COMMIT=$(git rev-parse "$TARGET")
-            echo "✅ Valid target: $TARGET (commit: ${TARGET_COMMIT:0:7})"
           else
             echo "❌ Invalid target: $TARGET"
             exit 1
@@ -64,36 +61,7 @@ jobs:
           echo "target-commit=$TARGET_COMMIT" >> $GITHUB_OUTPUT
 
       - name: Checkout target version
-        run: |
-          echo "🔄 Checking out target: ${{ steps.target.outputs.target-ref }}"
-          git checkout ${{ steps.target.outputs.target-commit }}
-
-      - name: Get current deployment info
-        id: current
-        run: |
-          CURRENT_TAG=$(git tag -l "deploy-*" --sort=-version:refname | head -n 1)
-          CURRENT_COMMIT=$(git rev-parse HEAD)
-
-          echo "current-tag=$CURRENT_TAG" >> $GITHUB_OUTPUT
-          echo "current-commit=$CURRENT_COMMIT" >> $GITHUB_OUTPUT
-
-          echo "📊 Current deployment info:"
-          echo "  Tag: $CURRENT_TAG"
-          echo "  Commit: ${CURRENT_COMMIT:0:7}"
-
-      - name: Confirm rollback
-        run: |
-          echo "⚠️  ROLLBACK CONFIRMATION"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "FROM: ${{ steps.current.outputs.current-tag || 'Unknown' }}"
-          echo "      Commit: ${{ steps.current.outputs.current-commit }}"
-          echo ""
-          echo "TO:   ${{ steps.target.outputs.target-ref }}"
-          echo "      Commit: ${{ steps.target.outputs.target-commit }}"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo ""
-          echo "Proceeding with rollback in 5 seconds..."
-          sleep 5
+        run: git checkout "${{ steps.target.outputs.target-commit }}"
 
       - name: Setup Node
         uses: actions/setup-node@v5
@@ -105,149 +73,38 @@ jobs:
         run: npm ci
 
       - name: Build from target version
-        id: build
-        run: |
-          echo "🔨 Building from target version..."
-          npm run build
-
-          if [ $? -eq 0 ]; then
-            echo "✅ Build successful"
-            echo "build-success=true" >> $GITHUB_OUTPUT
-          else
-            echo "❌ Build failed"
-            echo "build-success=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
+        run: npm run build
 
       - name: Validate build
-        if: steps.build.outputs.build-success == 'true'
-        run: |
-          echo "🔍 Validating build..."
+        run: test -f dist/index.html
 
-          if [ ! -f "dist/index.html" ]; then
-            echo "❌ index.html not found"
-            exit 1
-          fi
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
 
-          BUILD_SIZE=$(du -sb dist/ | cut -f1)
-          if [ "$BUILD_SIZE" -lt 1024 ]; then
-            echo "❌ Build size too small: ${BUILD_SIZE} bytes"
-            exit 1
-          fi
-
-          echo "✅ Build validation passed (size: ${BUILD_SIZE} bytes)"
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ./dist
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: peaceiris/actions-gh-pages@v4
+        uses: actions/deploy-pages@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./dist
-          publish_branch: gh-pages
-          commit_message: "rollback: ${{ steps.target.outputs.target-ref }}"
+          timeout: 600000
 
       - name: Health check
-        id: health-check
         if: ${{ !github.event.inputs.skip-health-check }}
         run: |
-          echo "🏥 Running health check..."
-          sleep 10
-
-          DEPLOY_URL="https://${{ github.repository_owner }}.github.io/test/"
-
-          if [ -z "$DEPLOY_URL" ]; then
-            echo "⚠️  Deploy URL not available, skipping health check"
-            exit 0
-          fi
-
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$DEPLOY_URL" || echo "000")
-
-          if [ "$HTTP_CODE" == "200" ]; then
-            echo "✅ Health check passed (HTTP $HTTP_CODE)"
-          else
-            echo "❌ Health check failed (HTTP $HTTP_CODE)"
-            exit 1
-          fi
+          sleep 15
+          URL="${{ steps.deployment.outputs.page_url }}"
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo "000")
+          test "$CODE" = "200"
 
       - name: Tag rollback deployment
         if: success()
         run: |
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          TAG_NAME="rollback-${TIMESTAMP}"
-
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "GitHub Actions"
-
-          git tag -a "$TAG_NAME" -m "Rollback to ${{ steps.target.outputs.target-ref }} at ${TIMESTAMP}"
+          TAG_NAME="rollback-$(date +%Y%m%d-%H%M%S)"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git tag -a "$TAG_NAME" -m "Rollback to ${{ steps.target.outputs.target-ref }}"
           git push origin "$TAG_NAME"
-
-          echo "✅ Created rollback tag: $TAG_NAME"
-
-      - name: Create rollback summary
-        if: always()
-        uses: actions/github-script@v8
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const success = '${{ job.status }}' === 'success';
-            const targetRef = '${{ steps.target.outputs.target-ref }}';
-            const targetCommit = '${{ steps.target.outputs.target-commit }}';
-
-            const emoji = success ? '✅' : '❌';
-            const status = success ? '成功' : '失败';
-
-            const summary = `## 🔄 回滚${status}
-
-            **状态**: ${emoji} 回滚${status}
-            **目标版本**: ${targetRef}
-            **目标 Commit**: ${targetCommit.substring(0, 7)}
-            **部署 URL**: ${{ steps.deployment.outputs.page_url || '未知' }}
-            **执行时间**: ${new Date().toISOString()}
-
-            ${success ? `
-            ### ✅ 回滚完成
-
-            应用已成功回滚到之前的版本。请验证功能是否正常。
-            ` : `
-            ### ❌ 回滚失败
-
-            回滚过程中发生错误，请检查日志并考虑手动回滚。
-            `}
-            `;
-
-            // 创建 Issue 记录回滚操作
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `🔄 回滚${status} - ${new Date().toISOString().split('T')[0]}`,
-              body: summary,
-              labels: ['deployment', 'rollback']
-            });
-
-            console.log(summary);
-
-      - name: Notify on success
-        if: success()
-        run: |
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "✅ 回滚成功完成"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo ""
-          echo "目标: ${{ steps.target.outputs.target-ref }}"
-          echo "Commit: ${{ steps.target.outputs.target-commit }}"
-          echo "URL: ${{ steps.deployment.outputs.page_url }}"
-          echo ""
-          echo "请验证应用功能是否正常。"
-
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "❌ 回滚失败"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo ""
-          echo "请检查日志并考虑以下选项："
-          echo "1. 手动回滚代码并重新部署"
-          echo "2. 修复构建问题后重试"
-          echo "3. 联系团队寻求帮助"
-          exit 1
