@@ -63,9 +63,6 @@ jobs:
        github.event_name == 'workflow_dispatch' ||
        (needs.check-approval.outputs.should-deploy == 'true'))
     runs-on: ubuntu-latest   # 在 GitHub 提供的 Linux 虚拟机上跑
-    environment:
-      name: github-pages
-      url: https://${{ github.repository_owner }}.github.io/test/
 
     steps:
       # 1. 拉取代码
