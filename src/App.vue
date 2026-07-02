@@ -6,4 +6,3 @@ import HelloWorld from './components/HelloWorld.vue'
   <h1 style="color: red;">Hello World</h1>
   <HelloWorld />
 </template>
-1
