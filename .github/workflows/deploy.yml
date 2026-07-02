@@ -8,11 +8,9 @@ on:
     types: [closed]      # PR 合并后触发
   workflow_dispatch:   # 允许在 GitHub 网页手动点「Run workflow」
 
-# 权限：部署 Pages 需要
+# 权限：push gh-pages 分支部署
 permissions:
-  contents: write  # 需要写权限以创建 tag
-  pages: write
-  id-token: write
+  contents: write
 
 # 只允许一个部署任务同时跑，避免冲突
 concurrency:
@@ -67,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest   # 在 GitHub 提供的 Linux 虚拟机上跑
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: https://${{ github.repository_owner }}.github.io/test/
 
     steps:
       # 1. 拉取代码
@@ -150,24 +148,18 @@ jobs:
 
           echo "✅ Build validation passed (size: ${BUILD_SIZE} bytes)"
 
-      # 8. 配置 GitHub Pages（官方必需步骤，缺少时容易卡在 deployment_queued）
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      # 9. 上传构建产物
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v5
-        with:
-          path: dist
-
-      # 10. 部署到 GitHub Pages
+      # 8. 部署到 GitHub Pages（git push，不走 Deployment API，避免 deployment_queued）
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        if: steps.build.outputs.build-success == 'true'
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          timeout: 300000  # 5 分钟超时，避免无限卡在 deployment_queued
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          publish_branch: gh-pages
+          commit_message: "deploy: ${{ github.sha }}"
 
-      # 11. 检查部署状态
+      # 9. 检查部署状态
       - name: Check deployment status
         id: deploy-check
         run: |
@@ -179,7 +171,7 @@ jobs:
             echo "deploy-success=false" >> $GITHUB_OUTPUT
           fi
 
-      # 12. 运行健康检查（可选）
+      # 10. 运行健康检查（可选）
       - name: Health check
         id: health-check
         if: steps.deploy-check.outputs.deploy-success == 'true'
@@ -191,7 +183,7 @@ jobs:
           sleep 10
 
           # 获取部署 URL
-          DEPLOY_URL="${{ steps.deployment.outputs.page_url }}"
+          DEPLOY_URL="https://${{ github.repository_owner }}.github.io/test/"
 
           if [ -z "$DEPLOY_URL" ]; then
             echo "⚠️  Deploy URL not available, skipping health check"
@@ -290,7 +282,7 @@ jobs:
 
             **状态**: ${message}
             **Commit**: ${context.sha.substring(0, 7)}
-            **部署 URL**: ${{ steps.deployment.outputs.page_url || '未知' }}
+            **部署 URL**: https://${{ github.repository_owner }}.github.io/test/
 
             ${!deploySuccess && lastTag ? `
             ### 🔄 回滚指南

@@ -16,8 +16,6 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -28,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: https://${{ github.repository_owner }}.github.io/test/
 
     steps:
       - name: Checkout
@@ -142,14 +140,14 @@ jobs:
 
           echo "✅ Build validation passed (size: ${BUILD_SIZE} bytes)"
 
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v5
-        with:
-          path: dist
-
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          publish_branch: gh-pages
+          commit_message: "rollback: ${{ steps.target.outputs.target-ref }}"
 
       - name: Health check
         id: health-check
@@ -158,7 +156,7 @@ jobs:
           echo "🏥 Running health check..."
           sleep 10
 
-          DEPLOY_URL="${{ steps.deployment.outputs.page_url }}"
+          DEPLOY_URL="https://${{ github.repository_owner }}.github.io/test/"
 
           if [ -z "$DEPLOY_URL" ]; then
             echo "⚠️  Deploy URL not available, skipping health check"
