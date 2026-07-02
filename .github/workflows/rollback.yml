@@ -82,7 +82,7 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v3
         with:
           path: ./dist
 
@@ -91,6 +91,8 @@ jobs:
         uses: actions/deploy-pages@v4
         with:
           timeout: 600000
+          error_count: 30
+          reporting_interval: 10000
 
       - name: Health check
         if: ${{ !github.event.inputs.skip-health-check }}

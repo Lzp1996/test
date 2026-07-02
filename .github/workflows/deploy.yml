@@ -6,8 +6,7 @@ name: Deploy Vue to GitHub Pages
 # - 不再 push gh-pages 分支，避免触发卡死的 pages-build-deployment 循环
 
 on:
-  push:
-    branches: [master]
+  # 仅 workflow_dispatch，避免 push + 自动 dispatch + pages-build-deployment 并发导致 Deployment cancelled
   workflow_dispatch:
 
 permissions:
@@ -66,7 +65,7 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v3
         with:
           path: ./dist
 
@@ -75,6 +74,8 @@ jobs:
         uses: actions/deploy-pages@v4
         with:
           timeout: 600000
+          error_count: 30
+          reporting_interval: 10000
 
       - name: Health check
         continue-on-error: true
