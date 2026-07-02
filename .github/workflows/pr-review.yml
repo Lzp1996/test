@@ -15,6 +15,7 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  actions: write
 
 jobs:
   check-skip-review:
@@ -446,12 +447,21 @@ jobs:
 
               console.log('✅ PR merged successfully');
 
+              // GITHUB_TOKEN 触发的 merge 不会自动启动 deploy.yml，需手动 dispatch
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'deploy.yml',
+                ref: 'master'
+              });
+              console.log('✅ Triggered deploy.yml workflow');
+
               // 评论成功信息
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: `## ✅ 自动合并成功\n\n低风险变更已自动合并，部署流程将自动触发。\n\n📊 **审查摘要**:\n- 风险级别: 🟢 Low\n- 审查状态: ✅ Passed\n- 合并方式: Squash and merge\n\n部署完成后会自动通知。`
+                body: `## ✅ 自动合并成功\n\n低风险变更已自动合并，并已触发部署 workflow。\n\n📊 **审查摘要**:\n- 风险级别: 🟢 Low\n- 审查状态: ✅ Passed\n- 合并方式: Squash and merge\n\n部署完成后网站会自动更新。`
               });
 
             } catch (error) {
